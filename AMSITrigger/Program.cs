@@ -1,180 +1,130 @@
-﻿using System;
-using System.Runtime.InteropServices;
+﻿using NDesk.Options;
+
+using System;
+using System.Diagnostics;
 using System.IO;
-using NDesk.Options;
 
 namespace AmsiTrigger
 {
-
     using static Globals;
 
     public static class Globals
     {
-        public static int minSignatureLength = 6;       // Playing with these can result in quicker execution time and less AMSIScanBuffer calls. It can also reduce the accuracy of trigger identification.
-        public static int maxSignatureLength = 2048;    // Setting maxSignatureLength will ensure that signatures split over data chunks dont get missed as only the first (chunkSize - maxSignatureLength) will be reported as clean
-        public static int format = 1;
-        public static int chunkSize = 4096;
-        public static int max = 0;
-        public static Boolean help = false;
-        public static Boolean debug = false;
-        public static string inScript;
-        public static IntPtr amsiContext;
-        public static string inURL;
-        public static int lineNumber = 1;
-        public static int sampleIndex = 0; 
-        public static int amsiCalls = 0;
-        public static int chunksProcessed = 0;
-        public static int triggersFound = 0;
+        public static int MinSignatureLength { get; set; } = 6;       // Playing with these can result in quicker execution time and less AMSIScanBuffer calls. It can also reduce the accuracy of trigger identification.
+        public static int MaxSignatureLength { get; set; } = 2048;    // Setting maxSignatureLength will ensure that signatures split over data chunks dont get missed as only the first (chunkSize - maxSignatureLength) will be reported as clean
+        public static int ChunkSize { get; set; } = 4096;
+        public static bool Help { get; set; } = false;
+        public static string FilePath { get; set; }
+        public static string FileUrl { get; set; }
+        public static int AmsiCalls { get; set; } = 0;
+        public static int ChunksProcessed { get; set; } = 0;
+        public static bool IsMalicious { get; set; } = false;
+        public static int ThreatsFound { get; set; } = 0;
     }
-
-
-
 
     class Program
     {
-                          
-        [DllImport("Amsi.dll", EntryPoint = "AmsiInitialize", CallingConvention = CallingConvention.StdCall)]
-        public static extern int AmsiInitialize([MarshalAs(UnmanagedType.LPWStr)]string appName, out IntPtr amsiContext);
-        [DllImport("Amsi.dll", EntryPoint = "AmsiUninitialize", CallingConvention = CallingConvention.StdCall)]
-        public static extern void AmsiUninitialize(IntPtr amsiContext);
-  
-                            
-
-
         static void Main(string[] args)
         {
-            
-            string infile = string.Empty;
+            Helpers.PrintLogo();
 
-
-            var watch = System.Diagnostics.Stopwatch.StartNew();
-
-
-            if (!validParameters(args))
+            if (!ValidParameters(args))
             {
                 return;
             }
 
-            if (!AmsiInitialize())
+#if DEBUG
+            CustomConsole.WriteDebug("Debug mode enabled");
+            CustomConsole.WriteDebug($"Chunk Size: {ChunkSize}");
+            CustomConsole.WriteDebug($"Max Sig Length: {MaxSignatureLength}");
+#endif
+
+            var watch = Stopwatch.StartNew();
+
+            using (var amsi = new AmsiInstance())
             {
-                return;
+                if (!amsi.IsProtectionEnabled)
+                {
+                    CustomConsole.WriteError("Ensure Real-time Protection is enabled");
+                    return;
+                }
+
+                amsi.FindTriggers();
+
+                if (IsMalicious && ThreatsFound == 0)
+                {
+                    CustomConsole.WriteError("File is malicious, but could not find individual threat(s). Modify MaxSigLength and/or ChunkSize to finesse the detections.");
+                }
             }
-
-            Triggers.FindTriggers();
-
-            AmsiUninitialize(amsiContext);
 
             watch.Stop();
 
-            if (debug)
-            {
-                Console.ForegroundColor = System.ConsoleColor.Gray;
-                Console.WriteLine($"\n\r\n\rChunks Processed: {chunksProcessed}");
-                Console.WriteLine($"Triggers Found: {triggersFound}");
-                Console.WriteLine($"AmsiScanBuffer Calls: {amsiCalls}");
-                Console.WriteLine($"Total Execution Time: {watch.Elapsed.TotalSeconds} s");
-            }
-
+#if DEBUG
+            CustomConsole.WriteDebug($"Chunks Processed: {ChunksProcessed}");
+            CustomConsole.WriteDebug($"Threats Found: {ThreatsFound}");
+            CustomConsole.WriteDebug($"AmsiScanBuffer Calls: {AmsiCalls}");
+            CustomConsole.WriteDebug($"Total Execution Time: {Math.Round(watch.Elapsed.TotalSeconds, 2)}s");
+#endif
         }
 
-
-
-        public static Boolean validParameters(string[] args)
+        public static bool ValidParameters(string[] args)
         {
-
-
-            var options = new OptionSet(){
-                {"i|inputfile=", "Powershell filename or", o => inScript = o},
-                {"u|url=", "URL eg. https://10.1.1.1/Invoke-NinjaCopy.ps1", o => inURL = o},
-                {"f|format=", "Output Format:"+"\n1 - Only show Triggers\n2 - Show Triggers with line numbers\n3 - Show Triggers inline with code\n4 - Show AMSI calls (xmas tree mode)", (int o) => format = o},
-                {"d|debug","Show debug info", o => debug = true},
-                {"m|maxsiglength=","Maximum Signature Length to cater for, default=2048", (int o) => maxSignatureLength = o},
-                {"c|chunksize=","Chunk size to send to AMSIScanBuffer, default=4096", (int o) => chunkSize = o},
-                {"h|?|help","Show Help", o => help = true},
+            var options = new OptionSet()
+            {
+                {"i|inputfile=", "Path to a file on disk", o => FilePath = o},
+                {"u|url=", "URL eg. https://10.1.1.1/Invoke-NinjaCopy.ps1", o => FileUrl = o},
+                {"m|maxsiglength=","Maximum Signature Length to cater for, default=2048", (int o) => MaxSignatureLength = o},
+                {"c|chunksize=","Chunk size to send to AMSIScanBuffer, default=4096", (int o) => ChunkSize = o},
+                {"h|?|help","Show Help", o => Help = true},
             };
 
             try
             {
                 options.Parse(args);
 
-                if (help || args.Length == 0)
+                if (Help || args.Length == 0)
                 {
-                    showHelp(options);
+                    ShowHelp(options);
                     return false;
                 }
-
-                if (format < 1 || format > 4)
-                {
-                    showHelp(options);
-                    return false;
-                }
-
             }
             catch (Exception e)
             {
-                Console.Error.WriteLine(e.Message);
-                showHelp(options);
+                CustomConsole.WriteError(e.Message);
+                ShowHelp(options);
                 return false;
             }
 
-
-            if (inScript!=null && inURL!=null)
+            if (!string.IsNullOrEmpty(FilePath) && !string.IsNullOrEmpty(FileUrl))
             {
-                Console.WriteLine("[+] Supply either -i or -u, not both");
+                CustomConsole.WriteError("Supply either -i or -u, not both");
                 return false;
             }
 
-            if (inURL!=null && inURL.ToLower().Substring(0,7)!="http://" && inURL.ToLower().Substring(0, 8) != "https://") 
+            if (!string.IsNullOrEmpty(FileUrl) && !FileUrl.Substring(0, 7).Equals("http://", StringComparison.OrdinalIgnoreCase) && !FileUrl.Substring(0, 8).Equals("https://", StringComparison.OrdinalIgnoreCase))
             {
-                Console.WriteLine("[+] Invalid URL - must begin with http:// or https://");
+                CustomConsole.WriteError("Invalid URL - must begin with http:// or https://");
                 return false;
             }
 
-            if (chunkSize < maxSignatureLength)
+            if (ChunkSize < MaxSignatureLength)
             {
-                Console.WriteLine("[+] chunksize should always be > maxSignatureLength");
+                CustomConsole.WriteError("chunksize should always be > maxSignatureLength");
                 return false;
             }
 
-
-            if (inScript!=null && !File.Exists(inScript))
+            if (!string.IsNullOrEmpty(FilePath) && !File.Exists(FilePath))
             {
-                Console.WriteLine("[+] File not found");
+                CustomConsole.WriteError("File not found");
                 return false;
             }
+
             return true;
         }
 
-
-        public static void showHelp(OptionSet p)
+        public static void ShowHelp(OptionSet p)
         {
-
-            Console.WriteLine(@"     _    __  __ ____ ___ _____     _");
-            Console.WriteLine(@"    / \  |  \/  / ___|_ _|_   _| __(_) __ _  __ _  ___ _ __ ");
-            Console.WriteLine(@"   / _ \ | |\/| \___ \| |  | || '__| |/ _` |/ _` |/ _ \ '__|");
-            Console.WriteLine(@"  / ___ \| |  | |___) | |  | || |  | | (_| | (_| |  __/ |   ");
-            Console.WriteLine(@" /_/   \_\_|  |_|____/___| |_||_|  |_|\__, |\__, |\___|_|   ");
-            Console.WriteLine(@"                                      |___/ |___/         v3");
-            Console.WriteLine("@_RythmStick\n\n\n");
-
-           
-            Console.WriteLine("Show triggers in Powershell file or URL.\nUsage:");
             p.WriteOptionDescriptions(Console.Out);
         }
-
-
-        public static Boolean AmsiInitialize()
-        {
-            
-            int returnValue = AmsiInitialize(@"PowerShell_C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe_10.0.18362.1", out amsiContext);
-            if (returnValue==0)
-            {
-                return true;
-            }
-            return false;
-        }
-   
     }
 }
-
-
