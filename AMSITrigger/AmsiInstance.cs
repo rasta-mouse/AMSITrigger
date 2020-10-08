@@ -161,7 +161,7 @@ namespace AmsiTrigger
             return 0;
         }
 
-        public void HexDump(byte[] sample, int start, int length)
+        void HexDump(byte[] sample, int start, int length)
         {
             var bytesPerLine = 16;
 
@@ -223,6 +223,7 @@ namespace AmsiTrigger
                     charColumn++;
                 }
 
+                result.Append(" ");
                 result.Append(line);
             }
 
